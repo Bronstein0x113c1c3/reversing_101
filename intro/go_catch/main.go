@@ -14,14 +14,14 @@ func main() {
 
 	// Đường dẫn đến file thực thi (debuggee) bạn muốn debug
 	// Để test, hãy đổi thành file debuggee đã biên dịch của bạn
-	debuggeePath := "./intro"
+	debuggeePath := "./pseudo"
 
 	// 1. Cấu hình SysProcAttr để kích hoạt Ptrace cho tiến trình con
 	cmd := exec.Command(debuggeePath)
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Ptrace: true, // Tự động gọi PTRACE_TRACEME ngay sau khi fork, trước khi exec
 	}
-	cmd.Stdout = os.Stdout
+	// cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
 	// 2. Fork và Exec tiến trình con
@@ -60,10 +60,19 @@ func main() {
 
 				// Đọc thanh ghi RIP (Instruction Pointer) để xem đang dừng ở đâu
 				var regs syscall.PtraceRegs
+
 				if err := syscall.PtraceGetRegs(pid, &regs); err == nil {
 					// Trên x86_64, sau khi chạy INT3, RIP sẽ trỏ vào lệnh TIẾP THEO (sau INT3 1 byte)
-					fmt.Printf("[Debugger] Đang dừng tại RIP: 0x%x\n", regs.Rip)
+					// fmt.Printf("[Debugger] Đang dừng tại RIP: 0x%x\n", regs.Rip)
+					// fmt.Printf("[Debugger] Đang dừng tại RIP: %+v", regs)
 				}
+				chunk := make([]byte, 20)
+				chunk2 := make([]byte, 30)
+				syscall.PtracePeekData(pid,uintptr(regs.Rdi),chunk)
+				syscall.PtracePeekText(pid,uintptr(regs.Rip),chunk2)
+				// syscall.PtraceSyscall()
+				fmt.Println(chunk)
+				fmt.Println(chunk2)
 
 				// Bạn có thể xử lý logic breakpoint tại đây...
 			} else {

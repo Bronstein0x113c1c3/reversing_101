@@ -1,0 +1,345 @@
+// package main
+//
+// import (
+// 	"fmt"
+// 	"os"
+// 	// "os"
+// 	"os/exec"
+// 	"runtime"
+// 	"syscall"
+// )
+//
+// // Hàm đọc dữ liệu từ bộ nhớ của Debuggee dựa vào địa chỉ và độ dài byte chính xác
+// func readMemoryData(pid int, addr uintptr, length int) ([]byte, error) {
+// 	buf := make([]byte, length)
+//
+// 	// PtracePeekData đọc theo từng khối 8-byte (word)
+// 	for i := 0; i < length; i += 8 {
+// 		chunk := make([]byte, 8)
+// 		_, err := syscall.PtracePeekData(pid, addr+uintptr(i), chunk)
+// 		if err != nil {
+// 			// Nếu lỗi ở cuối chuỗi do không chia hết cho 8, ta vẫn giữ phần dữ liệu đã đọc thành công
+// 			if i > 0 {
+// 				return buf[:i], nil
+// 			}
+// 			return nil, err
+// 		}
+//
+// 		// Copy dữ liệu thực tế vào buffer chung, tránh ghi đè quá giới hạn length
+// 		rem := length - i
+// 		if rem > 8 {
+// 			rem = 8
+// 		}
+// 		copy(buf[i:], chunk[:rem])
+// 	}
+// 	return buf, nil
+// }
+//
+// func main() {
+// 	// Ptrace yêu cầu khóa thread cố định vì Linux gán quyền trace cho từng Thread ID
+// 	runtime.LockOSThread()
+//
+// 	// Đường dẫn đến file thực thi (debuggee) bạn muốn debug
+// 	// Để test, hãy đổi thành file debuggee đã biên dịch của bạn
+// 	debuggeePath := "./pseudo"
+//
+// 	// 1. Cấu hình SysProcAttr để kích hoạt Ptrace cho tiến trình con
+// 	cmd := exec.Command(debuggeePath)
+// 	cmd.SysProcAttr = &syscall.SysProcAttr{
+// 		Ptrace: true, // Tự động gọi PTRACE_TRACEME ngay sau khi fork, trước khi exec
+// 	}
+// 	// cmd.Stdout = os.Stdout
+// 	cmd.Stderr = os.Stderr
+//
+// 	// 2. Fork và Exec tiến trình con
+// 	_ = cmd.Start()
+//
+// 	pid := cmd.Process.Pid
+// 	fmt.Printf("[Debugger] Đang giám sát tiến trình PID: %d\n", pid)
+//
+// 	var wstatus syscall.WaitStatus
+//
+// 	// Chờ tín hiệu dừng đầu tiên sau khi fork/exec thành công
+// 	syscall.Wait4(pid, &wstatus, 0, nil)
+//
+// 	isExitSpace := false // Cờ phân biệt Entry (vào) và Exit (ra) của Syscall
+//
+// 	for {
+// 		// Yêu cầu dừng tại điểm entry/exit của syscall tiếp theo
+// 		err := syscall.PtraceSyscall(pid, 0)
+// 		if err != nil {
+// 			break
+// 		}
+//
+// 		// Chờ child thay đổi trạng thái
+// 		_, err = syscall.Wait4(pid, &wstatus, 0, nil)
+// 		if err != nil {
+// 			break
+// 		}
+//
+// 		// Kiểm tra nếu child đã thoát
+// 		if wstatus.Exited() {
+// 			fmt.Printf("\n[Debugger] Tiến trình con đã kết thúc với mã: %d\n", wstatus.ExitStatus())
+// 			break
+// 		}
+//
+// 		if wstatus.Stopped() && wstatus.StopSignal() == syscall.SIGTRAP {
+// 			var regs syscall.PtraceRegs
+// 			if err := syscall.PtraceGetRegs(pid, &regs); err == nil {
+//
+// 				syscallID := regs.Orig_rax // Số hiệu Syscall trên Linux x86_64
+//
+// 				// Kiểm tra nếu đó là Syscall `write` (ID = 1) và ở thời điểm vừa chuẩn bị gọi (Entry)
+// 				if syscallID == 1 && !isExitSpace {
+// 					fd := regs.Rdi           // Tham số 1: Kênh xuất dữ liệu (1 = stdout)
+// 					dataAddr := regs.Rsi     // Tham số 2: Địa chỉ vùng nhớ chứa chuỗi
+// 					dataLen := int(regs.Rdx) // Tham số 3: Độ dài chuỗi dữ liệu (bytes)
+//
+// 					// Tiến hành đọc lén dữ liệu từ vùng nhớ của debuggee
+// 					interceptedBytes, err := readMemoryData(pid, uintptr(dataAddr), dataLen)
+//
+// 					if err == nil && fd == 1 {
+// 						fmt.Printf("\n[Syscall Spy] Phát hiện hành vi in chữ (write to stdout):\n")
+// 						fmt.Printf("               -> Địa chỉ bộ nhớ: 0x%x\n", dataAddr)
+// 						fmt.Printf("               -> Độ dài: %d bytes\n", dataLen)
+// 						fmt.Printf("               -> Nội dung đánh cắp: %s", string(interceptedBytes))
+// 					}
+// 				}
+//
+// 				// Đảo cờ Entry/Exit luân phiên cho lần chặn kế tiếp
+// 				isExitSpace = !isExitSpace
+// 			}
+// 		}
+// 	}
+// }
+
+
+
+
+
+
+
+
+package main
+
+import (
+	"debug/elf"
+	"debug/gosym"
+	"fmt"
+	"os"
+	"os/exec"
+	"runtime"
+	"syscall"
+)
+
+// Biến toàn cục lưu trữ bảng ký hiệu của file thực thi để tra cứu nhanh
+var goSymbolTable *gosym.Table
+
+// Hàm khởi tạo: Đọc file ELF của debuggee và dựng cấu trúc bảng ký hiệu
+func initSymbolTable(binaryPath string) error {
+	f, err := os.Open(binaryPath)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	elfFile, err := elf.NewFile(f)
+	if err != nil {
+		return err
+	}
+
+	// 1. Tìm phân đoạn chứa bảng dòng lệnh của Go (.gopclntab)
+	pclntabSection := elfFile.Section(".gopclntab")
+	if pclntabSection == nil {
+		return fmt.Errorf("không tìm thấy phân đoạn .gopclntab trong file ELF. File có thể đã bị stripped")
+	}
+
+	pclntabData, err := pclntabSection.Data()
+	if err != nil {
+		return err
+	}
+
+	// 2. Dựng bảng LineTable của Go
+	lineTable := gosym.NewLineTable(pclntabData, elfFile.Section(".text").Addr)
+
+	// 3. Khởi tạo bảng ký hiệu hoàn chỉnh
+	// Phân đoạn text/symtab của Go có cấu trúc đặc thù, ta truyền mảng rỗng cho symtab thô của ELF
+	tab, err := gosym.NewTable([]byte{}, lineTable)
+	if err != nil {
+		return err
+	}
+
+	goSymbolTable = tab
+	return nil
+}
+
+// Hàm hỗ trợ: Dịch địa chỉ bộ nhớ Hex sang tên hàm tường minh
+func resolveAddressToFunctionName(addr uint64) string {
+	if goSymbolTable == nil {
+		return "Unknown (Bảng ký hiệu chưa được nạp)"
+	}
+	// Tìm hàm tương ứng với địa chỉ Program Counter (PC/RIP)
+	fn := goSymbolTable.PCToFunc(addr)
+	if fn != nil {
+		return fn.Name
+	}
+	return "Unknown Function"
+}
+
+// --- CÁC HÀM ĐỌC BỘ NHỚ VÀ INTERCEPT VẪN GIỮ NGUYÊN ---
+
+func readGoMemoryContent(pid int, addr uintptr, length int) (string, error) {
+	if length <= 0 || length > 4096 {
+		return "<Độ dài chuỗi không hợp lệ>", nil
+	}
+	buf := make([]byte, length)
+	for i := 0; i < length; i += 8 {
+		chunk := make([]byte, 8)
+		_, err := syscall.PtracePeekData(pid, addr+uintptr(i), chunk)
+		if err != nil {
+			if i > 0 {
+				return string(buf[:i]), nil
+			}
+			return "", err
+		}
+		rem := length - i
+		if rem > 8 {
+			rem = 8
+		}
+		copy(buf[i:], chunk[:rem])
+	}
+	return string(buf), nil
+}
+
+func readAddr(pid int, addr uintptr) (uint64, error) {
+	chunk := make([]byte, 8)
+	_, err := syscall.PtracePeekData(pid, addr, chunk)
+	if err != nil {
+		return 0, err
+	}
+	var val uint64
+	for i := 0; i < 8; i++ {
+		val |= uint64(chunk[i]) << (8 * i)
+	}
+	return val, nil
+}
+
+// Hàm hỗ trợ phân tích: Kết hợp địa chỉ và Tên hàm cụ thể
+func traceCallerCallee(pid int, regs *syscall.PtraceRegs) {
+	fmt.Println("  ├──> [Trace Stack] --- PHÂN TÍCH QUAN HỆ CALL HÀM ---")
+
+	// Xác định địa chỉ và tên hàm Callee
+	calleeAddress := regs.Rip - 1
+	calleeName := resolveAddressToFunctionName(calleeAddress)
+	fmt.Printf("  │    ├── [Callee (Hiện tại)]: %s (Địa chỉ: 0x%x)\n", calleeName, calleeAddress)
+
+	// Lần tìm địa chỉ và tên hàm Caller
+	var callerAddress uint64
+	callerFromRSP, errRSP := readAddr(pid, uintptr(regs.Rsp))
+	callerFromRBP, errRBP := readAddr(pid, uintptr(regs.Rbp+8))
+
+	if errRSP == nil && callerFromRSP < 0x7fffffffffff && callerFromRSP > 0x400000 {
+		callerAddress = callerFromRSP
+	} else if errRBP == nil {
+		callerAddress = callerFromRBP
+	}
+
+	if callerAddress != 0 {
+		callerName := resolveAddressToFunctionName(callerAddress)
+		fmt.Printf("  │    └── [Caller (Hàm cha)]:  %s (Địa chỉ: 0x%x)\n", callerName, callerAddress)
+	} else {
+		fmt.Println("  │    └── [Caller (Hàm cha)]:  Không tìm thấy thông tin Stack Frame.")
+	}
+}
+
+func main() {
+	runtime.LockOSThread()
+
+	debuggeePath := "./debuggee"
+
+	// NẠP BẢNG KÝ HIỆU TRƯỚC KHI CHẠY TIẾN TRÌNH CON
+	err := initSymbolTable(debuggeePath)
+	if err != nil {
+		fmt.Printf("[Cảnh báo] Không thể đọc bảng ký hiệu của %s: %v. Debugger sẽ chỉ hiển thị địa chỉ Hex thô.\n", debuggeePath, err)
+	} else {
+		fmt.Println("[Debugger] Tải bảng ký hiệu .gopclntab thành công.")
+	}
+
+	cmd := exec.Command(debuggeePath)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Ptrace: true}
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	err = cmd.Start()
+	if err != nil {
+		fmt.Printf("Lỗi khởi chạy debuggee: %v\n", err)
+		return
+	}
+	pid := cmd.Process.Pid
+	fmt.Printf("[Debugger] Đã kích hoạt giám sát tiến trình con PID: %d\n", pid)
+
+	var wstatus syscall.WaitStatus
+	syscall.Wait4(pid, &wstatus, 0, nil)
+
+	isSyscallExitSpace := false
+
+	for {
+		err := syscall.PtraceSyscall(pid, 0)
+		if err != nil {
+			break
+		}
+
+		_, err = syscall.Wait4(pid, &wstatus, 0, nil)
+		if err != nil {
+			break
+		}
+
+		if wstatus.Exited() {
+			fmt.Printf("\n[Debugger] Tiến trình con (PID %d) đã thoát. Mã exit: %d\n", pid, wstatus.ExitStatus())
+			break
+		}
+
+		if wstatus.Stopped() && wstatus.StopSignal() == syscall.SIGTRAP {
+			var regs syscall.PtraceRegs
+			if err := syscall.PtraceGetRegs(pid, &regs); err == nil {
+				syscallID := regs.Orig_rax
+
+				if syscallID == 0xffffffffffffffff {
+					fmt.Println("\n[Breakpoint Spy] ==========================================================")
+					fmt.Println("  Đã chặn đứng điểm dừng phần mềm (Lệnh INT3 / runtime.Breakpoint)!")
+
+					strAddr := regs.Rax
+					strLen := int(regs.Rbx)
+					intValue := regs.Rcx
+
+					goStr, _ := readGoMemoryContent(pid, uintptr(strAddr), strLen)
+					fmt.Println("  ├──> [Tham Số Hàm] --- TRÍCH XUẤT GIÁ TRỊ TỪ THANH GHI ---")
+					fmt.Printf("  │    ├── Tham số 1 (Chuỗi Go): \"%s\" (Vị trí: 0x%x, Kích thước: %d bytes)\n", goStr, strAddr, strLen)
+					fmt.Printf("  │    └── Tham số 2 (Số nguyên Go): %d\n", intValue)
+
+					// Gọi hàm in vết Stack có dịch tên hàm
+					traceCallerCallee(pid, &regs)
+					fmt.Println("[Breakpoint Spy] ==========================================================")
+
+					isSyscallExitSpace = false
+					continue
+				}
+
+				if syscallID == 1 {
+					if !isSyscallExitSpace {
+						fd := regs.Rdi
+						dataAddr := regs.Rsi
+						dataLen := int(regs.Rdx)
+
+						if fd == 1 {
+							interceptedText, _ := readGoMemoryContent(pid, uintptr(dataAddr), dataLen)
+							fmt.Printf("\n[Syscall Interceptor] Phát hiện gọi Syscall 'write' (stdout):\n")
+							fmt.Printf("                      -> Đọc lén bộ nhớ tại 0x%x: \"%s\"\n", dataAddr, interceptedText)
+						}
+					}
+					isSyscallExitSpace = !isSyscallExitSpace
+				}
+			}
+		}
+	}
+}
