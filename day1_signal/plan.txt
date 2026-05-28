@@ -1,0 +1,6 @@
+day 1: signal, how to handle a signal
+
+source of signal: sender
+destination of signal: handler
+
+how to create a process...
