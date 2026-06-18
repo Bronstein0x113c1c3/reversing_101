@@ -17,6 +17,8 @@ mkShell {
     rustup
     openssl
     cmake
+    ddd
+    gdb
   ];
 }
 
